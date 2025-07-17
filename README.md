@@ -98,6 +98,3 @@ Includes simulation of:
 - **Thread-Safe**: Concurrent connection handling
 - **Extensible**: Easy to add new protocols or modify responses
 
-## License
-
-Educational and defensive security research use only.
