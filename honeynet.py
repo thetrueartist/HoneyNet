@@ -325,7 +325,8 @@ class HTTPRequestHandler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header('Content-Type', 'text/html; charset=utf-8')
             self.send_header('Content-Length', str(len(response_data)))
-            self.send_header('Server', 'HoneyNet/2.0 (Windows)')
+            platform_name = "Windows" if WindowsCompatibility.is_windows() else "Unix"
+            self.send_header('Server', f'HoneyNet/2.0 ({platform_name})')
             self.end_headers()
             
             if method != "HEAD":
@@ -353,8 +354,8 @@ class HTTPRequestHandler(BaseHTTPRequestHandler):
                 <h1>🍯 Connection Successful</h1>
                 <p>Path: {self.path}</p>
                 <p>Timestamp: {datetime.now().isoformat()}</p>
-                <p>Platform: Windows</p>
-                <p>Your request was processed by HoneyNet (Windows)</p>
+                <p>Platform: {platform.system()}</p>
+                <p>Your request was processed by HoneyNet ({platform.system()})</p>
             </body>
             </html>
             """
@@ -363,7 +364,8 @@ class HTTPRequestHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header('Content-Type', 'text/html; charset=utf-8')
         self.send_header('Content-Length', str(len(response_data)))
-        self.send_header('Server', 'HoneyNet/2.0 (Windows) (cached)')
+        platform_name = "Windows" if WindowsCompatibility.is_windows() else "Unix"
+        self.send_header('Server', f'HoneyNet/2.0 ({platform_name}) (cached)')
         self.end_headers()
         self.wfile.write(response_data.encode('utf-8'))
 
@@ -417,7 +419,8 @@ class HTTPSRequestHandler(HTTPRequestHandler):
             self.send_response(200)
             self.send_header('Content-Type', 'text/html; charset=utf-8')
             self.send_header('Content-Length', str(len(response_data)))
-            self.send_header('Server', 'HoneyNet/2.0 (Windows SSL)')
+            platform_name = "Windows" if WindowsCompatibility.is_windows() else "Unix"
+            self.send_header('Server', f'HoneyNet/2.0 ({platform_name} SSL)')
             self.send_header('Strict-Transport-Security', 'max-age=31536000')
             self.end_headers()
             
@@ -446,8 +449,8 @@ class HTTPSRequestHandler(HTTPRequestHandler):
                 <h1>🔒 Secure Connection Established</h1>
                 <p>Path: {self.path}</p>
                 <p>Timestamp: {datetime.now().isoformat()}</p>
-                <p>Platform: Windows</p>
-                <p>Your HTTPS request was processed by HoneyNet (Windows)</p>
+                <p>Platform: {platform.system()}</p>
+                <p>Your HTTPS request was processed by HoneyNet ({platform.system()})</p>
                 <p>SSL/TLS encryption is active</p>
             </body>
             </html>
@@ -485,7 +488,8 @@ class FTPServer:
     def handle_ftp_client(self, client_socket, addr):
         try:
             # Send welcome message
-            client_socket.send(b"220 HoneyNet FTP Server Ready (Windows)\r\n")
+            platform_name = "Windows" if WindowsCompatibility.is_windows() else "Unix"
+            client_socket.send(f"220 HoneyNet FTP Server Ready ({platform_name})\r\n".encode())
             
             while True:
                 try:
@@ -557,7 +561,8 @@ class SMTPServer:
     
     def handle_smtp_client(self, client_socket, addr):
         try:
-            client_socket.send(b"220 HoneyNet SMTP Server Ready (Windows)\r\n")
+            platform_name = "Windows" if WindowsCompatibility.is_windows() else "Unix"
+            client_socket.send(f"220 HoneyNet SMTP Server Ready ({platform_name})\r\n".encode())
             
             while True:
                 try:
@@ -607,13 +612,16 @@ class HoneyNetWindows:
         self.ports = WindowsCompatibility.get_safe_ports()
         
     def start(self):
-        self.logger.logger.info("Starting HoneyNet (Windows Edition)...")
+        platform_name = "Windows" if WindowsCompatibility.is_windows() else "Unix/Linux"
+        self.logger.logger.info(f"Starting HoneyNet ({platform_name} Edition)...")
         
         # Display port information
-        self.logger.logger.info(f"Using Windows-safe ports: {self.ports}")
+        port_type = "Windows-safe" if WindowsCompatibility.is_windows() else "standard"
+        self.logger.logger.info(f"Using {port_type} ports: {self.ports}")
         
         if not WindowsCompatibility.is_admin():
-            self.logger.logger.warning("Not running as administrator. Some features may be limited.")
+            privilege_type = "administrator" if WindowsCompatibility.is_windows() else "root"
+            self.logger.logger.warning(f"Not running as {privilege_type}. Some features may be limited.")
         
         self.running = True
         
@@ -656,7 +664,8 @@ class HoneyNetWindows:
         smtp_thread.start()
         self.servers.append(smtp_server)
         
-        self.logger.logger.info("All HoneyNet servers started successfully (Windows Edition)")
+        platform_name = "Windows" if WindowsCompatibility.is_windows() else "Unix/Linux"
+        self.logger.logger.info(f"All HoneyNet servers started successfully ({platform_name} Edition)")
         
         try:
             while self.running:
@@ -665,7 +674,8 @@ class HoneyNetWindows:
             self.stop()
     
     def stop(self):
-        self.logger.logger.info("Stopping HoneyNet (Windows Edition)...")
+        platform_name = "Windows" if WindowsCompatibility.is_windows() else "Unix/Linux"
+        self.logger.logger.info(f"Stopping HoneyNet ({platform_name} Edition)...")
         self.running = False
         
         for server in self.servers:
@@ -673,11 +683,12 @@ class HoneyNetWindows:
                 server.stop()
 
 def main():
-    parser = argparse.ArgumentParser(description='HoneyNet - Windows Edition')
+    parser = argparse.ArgumentParser(description='HoneyNet - Cross-Platform Edition')
     parser.add_argument('--config', help='Configuration file path')
     args = parser.parse_args()
     
-    print("HoneyNet Windows Edition")
+    platform_name = "Windows" if WindowsCompatibility.is_windows() else "Unix/Linux"
+    print(f"HoneyNet Cross-Platform Edition")
     print("=" * 50)
     
     if WindowsCompatibility.is_windows():
@@ -692,7 +703,8 @@ def main():
             print("Consider running with sudo for full functionality.")
     
     ports = WindowsCompatibility.get_safe_ports()
-    print(f"Using ports: HTTP={ports['http']}, HTTPS={ports['https']}, FTP={ports['ftp']}, SMTP={ports['smtp']}, DNS={ports['dns']}")
+    port_type = "Windows-safe" if WindowsCompatibility.is_windows() else "standard"
+    print(f"Using {port_type} ports: HTTP={ports['http']}, HTTPS={ports['https']}, FTP={ports['ftp']}, SMTP={ports['smtp']}, DNS={ports['dns']}")
     print()
     
     honeynet = HoneyNetWindows()
