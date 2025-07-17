@@ -9,6 +9,7 @@ import argparse
 import ssl
 import os
 import sys
+import platform
 from datetime import datetime, timedelta, timezone
 from collections import defaultdict
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -24,12 +25,59 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 import tempfile
 import ipaddress
 
+class WindowsCompatibility:
+    """Windows compatibility layer for HoneyNet"""
+    
+    @staticmethod
+    def is_windows():
+        return platform.system().lower() == 'windows'
+    
+    @staticmethod
+    def is_admin():
+        """Check if running with administrator privileges"""
+        if WindowsCompatibility.is_windows():
+            try:
+                import ctypes
+                return ctypes.windll.shell32.IsUserAnAdmin()
+            except:
+                return False
+        else:
+            return os.geteuid() == 0
+    
+    @staticmethod
+    def get_safe_ports():
+        """Get Windows-safe port configuration"""
+        if WindowsCompatibility.is_windows():
+            return {
+                'http': 8080,    # Avoid IIS conflicts
+                'https': 8443,   # Avoid IIS conflicts
+                'ftp': 2121,     # Same as Linux version
+                'smtp': 2525,    # Avoid Windows mail service conflicts
+                'dns': 5353      # Avoid Windows DNS service conflicts
+            }
+        else:
+            return {
+                'http': 80,
+                'https': 443,
+                'ftp': 2121,
+                'smtp': 25,
+                'dns': 53
+            }
+    
+    @staticmethod
+    def get_cert_dir():
+        """Get appropriate certificate directory for OS"""
+        if WindowsCompatibility.is_windows():
+            return os.path.join(os.environ.get('APPDATA', '.'), 'HoneyNet', 'certs')
+        else:
+            return './certs'
+
 class SSLCertificateManager:
-    def __init__(self, cert_dir="./certs"):
-        self.cert_dir = cert_dir
+    def __init__(self, cert_dir=None):
+        self.cert_dir = cert_dir or WindowsCompatibility.get_cert_dir()
         self.lock = threading.Lock()
-        if not os.path.exists(cert_dir):
-            os.makedirs(cert_dir)
+        if not os.path.exists(self.cert_dir):
+            os.makedirs(self.cert_dir, exist_ok=True)
     
     def generate_certificate(self, hostname="localhost"):
         """Generate a self-signed certificate for the given hostname"""
@@ -108,7 +156,7 @@ class RequestCache:
             self.cache.clear()
 
 class Logger:
-    def __init__(self, log_file="fakenet.log"):
+    def __init__(self, log_file="honeynet_windows.log"):
         self.log_file = log_file
         self.lock = threading.Lock()
         logging.basicConfig(
@@ -136,15 +184,16 @@ class Logger:
             
             # Save detailed log to JSON
             try:
-                with open(f"honeynet_detailed_{timestamp[:10]}.json", "a") as f:
+                log_filename = f"honeynet_detailed_{timestamp[:10]}.json"
+                with open(log_filename, "a", encoding='utf-8') as f:
                     f.write(json.dumps(log_entry) + "\n")
             except Exception as e:
                 self.logger.error(f"Failed to write detailed log: {e}")
 
 class DNSServer:
-    def __init__(self, host="0.0.0.0", port=53, logger=None):
+    def __init__(self, host="0.0.0.0", port=None, logger=None):
         self.host = host
-        self.port = port
+        self.port = port or WindowsCompatibility.get_safe_ports()['dns']
         self.logger = logger or Logger()
         self.socket = None
         self.running = False
@@ -171,34 +220,39 @@ class DNSServer:
     
     def handle_dns_request(self, data, addr):
         try:
-            # Simple DNS response - always return 127.0.0.1
-            if len(data) > 12:
-                # Extract query
-                query = data[12:]
-                domain = self.parse_domain(query)
-                
-                self.logger.log_request("DNS", addr, f"Query: {domain}")
-                
-                # Build response
-                response = self.build_dns_response(data, domain)
-                self.socket.sendto(response, addr)
-                
+            if len(data) < 12:
+                return
+            
+            # Extract domain from DNS query
+            domain = self.extract_domain(data)
+            self.logger.log_request("DNS", addr, f"Query: {domain}")
+            
+            # Build response
+            response = self.build_dns_response(data, domain)
+            self.socket.sendto(response, addr)
+            
         except Exception as e:
             self.logger.logger.error(f"DNS request handling error: {e}")
     
-    def parse_domain(self, query):
-        domain = ""
-        i = 0
-        while i < len(query):
-            length = query[i]
-            if length == 0:
-                break
-            i += 1
-            if domain:
-                domain += "."
-            domain += query[i:i+length].decode('utf-8', errors='ignore')
-            i += length
-        return domain
+    def extract_domain(self, data):
+        try:
+            # Skip header (12 bytes)
+            pos = 12
+            domain_parts = []
+            
+            while pos < len(data):
+                length = data[pos]
+                if length == 0:
+                    break
+                pos += 1
+                if pos + length > len(data):
+                    break
+                domain_parts.append(data[pos:pos+length].decode('utf-8'))
+                pos += length
+            
+            return '.'.join(domain_parts) if domain_parts else "unknown"
+        except:
+            return "unknown"
     
     def build_dns_response(self, request, domain):
         # Basic DNS response header
@@ -269,13 +323,13 @@ class HTTPRequestHandler(BaseHTTPRequestHandler):
             
             # Send response
             self.send_response(200)
-            self.send_header('Content-Type', 'text/html')
+            self.send_header('Content-Type', 'text/html; charset=utf-8')
             self.send_header('Content-Length', str(len(response_data)))
-            self.send_header('Server', 'HoneyNet/2.0')
+            self.send_header('Server', 'HoneyNet/2.0 (Windows)')
             self.end_headers()
             
             if method != "HEAD":
-                self.wfile.write(response_data.encode())
+                self.wfile.write(response_data.encode('utf-8'))
                 
         except Exception as e:
             self.logger.logger.error(f"HTTP request handling error: {e}")
@@ -284,33 +338,34 @@ class HTTPRequestHandler(BaseHTTPRequestHandler):
     def generate_response(self):
         # Generate realistic responses based on path
         if self.path.endswith('.js'):
-            return "console.log('Fake JavaScript loaded');"
+            return "console.log('HoneyNet JavaScript loaded');"
         elif self.path.endswith('.css'):
-            return "body { font-family: Arial, sans-serif; }"
+            return "body { font-family: Arial, sans-serif; background: #f0f0f0; }"
         elif self.path.endswith('.png') or self.path.endswith('.jpg'):
             return "Fake image data"
         elif 'api' in self.path:
-            return '{"status": "success", "data": "fake_api_response"}'
+            return '{"status": "success", "data": "honeypot_response", "platform": "windows"}'
         else:
             return f"""
             <html>
-            <head><title>Fake Network Response</title></head>
+            <head><title>HoneyNet Windows Response</title></head>
             <body>
-                <h1>Connection Successful</h1>
+                <h1>🍯 Connection Successful</h1>
                 <p>Path: {self.path}</p>
                 <p>Timestamp: {datetime.now().isoformat()}</p>
-                <p>Your request was processed by HoneyNet</p>
+                <p>Platform: Windows</p>
+                <p>Your request was processed by HoneyNet (Windows)</p>
             </body>
             </html>
             """
     
     def send_cached_response(self, response_data):
         self.send_response(200)
-        self.send_header('Content-Type', 'text/html')
+        self.send_header('Content-Type', 'text/html; charset=utf-8')
         self.send_header('Content-Length', str(len(response_data)))
-        self.send_header('Server', 'HoneyNet/2.0 (cached)')
+        self.send_header('Server', 'HoneyNet/2.0 (Windows) (cached)')
         self.end_headers()
-        self.wfile.write(response_data.encode())
+        self.wfile.write(response_data.encode('utf-8'))
 
 class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
     def __init__(self, server_address, RequestHandlerClass, logger, cache):
@@ -360,14 +415,14 @@ class HTTPSRequestHandler(HTTPRequestHandler):
             
             # Send response
             self.send_response(200)
-            self.send_header('Content-Type', 'text/html')
+            self.send_header('Content-Type', 'text/html; charset=utf-8')
             self.send_header('Content-Length', str(len(response_data)))
-            self.send_header('Server', 'HoneyNet/2.0 (SSL)')
+            self.send_header('Server', 'HoneyNet/2.0 (Windows SSL)')
             self.send_header('Strict-Transport-Security', 'max-age=31536000')
             self.end_headers()
             
             if method != "HEAD":
-                self.wfile.write(response_data.encode())
+                self.wfile.write(response_data.encode('utf-8'))
                 
         except Exception as e:
             self.logger.logger.error(f"HTTPS request handling error: {e}")
@@ -376,31 +431,32 @@ class HTTPSRequestHandler(HTTPRequestHandler):
     def generate_response(self):
         # Generate realistic HTTPS responses
         if self.path.endswith('.js'):
-            return "console.log('Secure JavaScript loaded via HTTPS');"
+            return "console.log('Secure JavaScript loaded via HTTPS on Windows');"
         elif self.path.endswith('.css'):
             return "body { font-family: Arial, sans-serif; background: #f0f0f0; }"
         elif self.path.endswith('.png') or self.path.endswith('.jpg'):
             return "Secure fake image data"
         elif 'api' in self.path:
-            return '{"status": "success", "data": "secure_api_response", "ssl": true}'
+            return '{"status": "success", "data": "secure_api_response", "ssl": true, "platform": "windows"}'
         else:
             return f"""
             <html>
-            <head><title>Secure HoneyNet Response</title></head>
+            <head><title>Secure HoneyNet Response (Windows)</title></head>
             <body>
                 <h1>🔒 Secure Connection Established</h1>
                 <p>Path: {self.path}</p>
                 <p>Timestamp: {datetime.now().isoformat()}</p>
-                <p>Your HTTPS request was processed by HoneyNet</p>
+                <p>Platform: Windows</p>
+                <p>Your HTTPS request was processed by HoneyNet (Windows)</p>
                 <p>SSL/TLS encryption is active</p>
             </body>
             </html>
             """
 
 class FTPServer:
-    def __init__(self, host="0.0.0.0", port=21, logger=None):
+    def __init__(self, host="0.0.0.0", port=None, logger=None):
         self.host = host
-        self.port = port
+        self.port = port or WindowsCompatibility.get_safe_ports()['ftp']
         self.logger = logger or Logger()
         self.socket = None
         self.running = False
@@ -429,7 +485,7 @@ class FTPServer:
     def handle_ftp_client(self, client_socket, addr):
         try:
             # Send welcome message
-            client_socket.send(b"220 HoneyNet FTP Server Ready\r\n")
+            client_socket.send(b"220 HoneyNet FTP Server Ready (Windows)\r\n")
             
             while True:
                 try:
@@ -437,7 +493,7 @@ class FTPServer:
                     if not data:
                         break
                     
-                    command = data.decode().strip()
+                    command = data.decode('utf-8', errors='ignore').strip()
                     self.logger.log_request("FTP", addr, command)
                     
                     # Handle basic FTP commands
@@ -471,9 +527,9 @@ class FTPServer:
             self.socket.close()
 
 class SMTPServer:
-    def __init__(self, host="0.0.0.0", port=25, logger=None):
+    def __init__(self, host="0.0.0.0", port=None, logger=None):
         self.host = host
-        self.port = port
+        self.port = port or WindowsCompatibility.get_safe_ports()['smtp']
         self.logger = logger or Logger()
         self.socket = None
         self.running = False
@@ -494,13 +550,14 @@ class SMTPServer:
                     threading.Thread(target=self.handle_smtp_client, args=(client_socket, addr)).start()
                 except socket.error:
                     if self.running:
+                        self.logger.logger.error("SMTP socket error")
                         break
         except Exception as e:
             self.logger.logger.error(f"SMTP Server failed to start: {e}")
     
     def handle_smtp_client(self, client_socket, addr):
         try:
-            client_socket.send(b"220 HoneyNet SMTP Server Ready\r\n")
+            client_socket.send(b"220 HoneyNet SMTP Server Ready (Windows)\r\n")
             
             while True:
                 try:
@@ -508,7 +565,7 @@ class SMTPServer:
                     if not data:
                         break
                     
-                    command = data.decode().strip()
+                    command = data.decode('utf-8', errors='ignore').strip()
                     self.logger.log_request("SMTP", addr, command)
                     
                     if command.upper().startswith("HELO") or command.upper().startswith("EHLO"):
@@ -539,17 +596,25 @@ class SMTPServer:
         if self.socket:
             self.socket.close()
 
-class HoneyNet:
+class HoneyNetWindows:
     def __init__(self, config=None):
         self.config = config or {}
-        self.logger = Logger("honeynet.log")
+        self.logger = Logger("honeynet_windows.log")
         self.cache = RequestCache()
         self.cert_manager = SSLCertificateManager()
         self.servers = []
         self.running = False
+        self.ports = WindowsCompatibility.get_safe_ports()
         
     def start(self):
-        self.logger.logger.info("Starting HoneyNet...")
+        self.logger.logger.info("Starting HoneyNet (Windows Edition)...")
+        
+        # Display port information
+        self.logger.logger.info(f"Using Windows-safe ports: {self.ports}")
+        
+        if not WindowsCompatibility.is_admin():
+            self.logger.logger.warning("Not running as administrator. Some features may be limited.")
+        
         self.running = True
         
         # Start DNS server
@@ -560,7 +625,7 @@ class HoneyNet:
         self.servers.append(dns_server)
         
         # Start HTTP server
-        http_server = ThreadedHTTPServer(('0.0.0.0', 80), HTTPRequestHandler, self.logger, self.cache)
+        http_server = ThreadedHTTPServer(('0.0.0.0', self.ports['http']), HTTPRequestHandler, self.logger, self.cache)
         http_thread = threading.Thread(target=http_server.serve_forever)
         http_thread.daemon = True
         http_thread.start()
@@ -568,7 +633,7 @@ class HoneyNet:
         
         # Start HTTPS server with SSL/TLS
         try:
-            https_server = SSLHTTPServer(('0.0.0.0', 443), HTTPSRequestHandler, self.logger, self.cache, self.cert_manager)
+            https_server = SSLHTTPServer(('0.0.0.0', self.ports['https']), HTTPSRequestHandler, self.logger, self.cache, self.cert_manager)
             https_thread = threading.Thread(target=https_server.serve_forever)
             https_thread.daemon = True
             https_thread.start()
@@ -577,8 +642,8 @@ class HoneyNet:
         except Exception as e:
             self.logger.logger.error(f"Failed to start HTTPS server: {e}")
         
-        # Start FTP server with alternative port to avoid conflicts
-        ftp_server = FTPServer(port=2121, logger=self.logger)
+        # Start FTP server
+        ftp_server = FTPServer(logger=self.logger)
         ftp_thread = threading.Thread(target=ftp_server.start)
         ftp_thread.daemon = True
         ftp_thread.start()
@@ -591,7 +656,7 @@ class HoneyNet:
         smtp_thread.start()
         self.servers.append(smtp_server)
         
-        self.logger.logger.info("All HoneyNet servers started successfully")
+        self.logger.logger.info("All HoneyNet servers started successfully (Windows Edition)")
         
         try:
             while self.running:
@@ -600,27 +665,37 @@ class HoneyNet:
             self.stop()
     
     def stop(self):
-        self.logger.logger.info("Stopping HoneyNet...")
+        self.logger.logger.info("Stopping HoneyNet (Windows Edition)...")
         self.running = False
         
         for server in self.servers:
             if hasattr(server, 'stop'):
                 server.stop()
-            elif hasattr(server, 'shutdown'):
-                server.shutdown()
 
 def main():
-    parser = argparse.ArgumentParser(description='Advanced FakeNet - Network Simulation for Malware Analysis')
-    parser.add_argument('--config', '-c', help='Configuration file path')
-    parser.add_argument('--verbose', '-v', action='store_true', help='Verbose logging')
-    
+    parser = argparse.ArgumentParser(description='HoneyNet - Windows Edition')
+    parser.add_argument('--config', help='Configuration file path')
     args = parser.parse_args()
     
-    if os.geteuid() != 0:
-        print("Warning: Running without root privileges. Some features may not work correctly.")
-        print("Consider running with sudo for full functionality.")
+    print("HoneyNet Windows Edition")
+    print("=" * 50)
     
-    honeynet = HoneyNet()
+    if WindowsCompatibility.is_windows():
+        print("Platform: Windows")
+        if not WindowsCompatibility.is_admin():
+            print("WARNING: Not running as administrator. Some features may be limited.")
+            print("Consider running as administrator for full functionality.")
+    else:
+        print("Platform: Unix/Linux")
+        if os.geteuid() != 0:
+            print("WARNING: Not running with root privileges. Some features may not work correctly.")
+            print("Consider running with sudo for full functionality.")
+    
+    ports = WindowsCompatibility.get_safe_ports()
+    print(f"Using ports: HTTP={ports['http']}, HTTPS={ports['https']}, FTP={ports['ftp']}, SMTP={ports['smtp']}, DNS={ports['dns']}")
+    print()
+    
+    honeynet = HoneyNetWindows()
     
     try:
         honeynet.start()
