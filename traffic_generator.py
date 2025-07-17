@@ -6,18 +6,45 @@ import time
 import random
 import argparse
 import json
+import platform
 import requests
 import smtplib
 from ftplib import FTP
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-import dns.resolver
 import subprocess
 import os
 import sys
 from datetime import datetime
 
-class TrafficGenerator:
+class WindowsCompatibility:
+    """Windows compatibility layer for traffic generator"""
+    
+    @staticmethod
+    def is_windows():
+        return platform.system().lower() == 'windows'
+    
+    @staticmethod
+    def get_safe_ports():
+        """Get Windows-safe port configuration"""
+        if WindowsCompatibility.is_windows():
+            return {
+                'http': 8080,
+                'https': 8443,
+                'ftp': 2121,
+                'smtp': 2525,
+                'dns': 5353
+            }
+        else:
+            return {
+                'http': 80,
+                'https': 443,
+                'ftp': 2121,
+                'smtp': 25,
+                'dns': 53
+            }
+
+class TrafficGeneratorWindows:
     def __init__(self, target_host="127.0.0.1", duration=300, threads=10):
         self.target_host = target_host
         self.duration = duration
@@ -34,6 +61,7 @@ class TrafficGenerator:
             'errors': 0
         }
         self.stats_lock = threading.Lock()
+        self.ports = WindowsCompatibility.get_safe_ports()
         
         # Common malware domains and URLs
         self.malware_domains = [
@@ -49,324 +77,293 @@ class TrafficGenerator:
             'backdoor-access.com'
         ]
         
+        # Malware-like URLs
         self.malware_urls = [
-            '/download/payload.exe',
-            '/api/register',
             '/api/checkin',
-            '/api/command',
+            '/api/register',
             '/api/upload',
-            '/admin/login',
+            '/api/download',
+            '/api/command',
             '/panel/index.php',
+            '/admin/login',
             '/gate.php',
-            '/config.json',
             '/update.bin',
+            '/config.json',
             '/screenshot.jpg',
             '/keylog.txt',
             '/stolen_data.zip',
+            '/bitcoin_wallet.json',
             '/ransom_note.txt',
-            '/bitcoin_wallet.json'
+            '/download/payload.exe'
         ]
         
-        self.user_agents = [
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Mozilla/5.0 (Windows NT 6.1; WOW64; Trident/7.0; rv:11.0) like Gecko',
-            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
-            'curl/7.68.0',
-            'wget/1.20.3',
-            'Python-urllib/3.8',
-            'python-requests/2.25.1',
-            'Malware-Bot/1.0',
-            'TrojanHorse/2.1',
-            'Backdoor-Client/1.5'
-        ]
+        # Check available libraries
+        self.libraries = {
+            'requests': self._check_requests(),
+            'email': self._check_email(),
+            'ftp': self._check_ftp()
+        }
+        
+    def _check_requests(self):
+        try:
+            import requests
+            return True
+        except ImportError:
+            return False
     
-    def update_stats(self, stat_name, increment=1):
+    def _check_email(self):
+        try:
+            import smtplib
+            from email.mime.text import MIMEText
+            return True
+        except ImportError:
+            return False
+    
+    def _check_ftp(self):
+        try:
+            from ftplib import FTP
+            return True
+        except ImportError:
+            return False
+    
+    def update_stats(self, key):
         with self.stats_lock:
-            self.stats[stat_name] += increment
+            self.stats[key] += 1
     
     def generate_http_traffic(self):
-        """Generate HTTP traffic simulating malware communications"""
+        """Generate HTTP traffic"""
+        if not self.libraries['requests']:
+            return
+            
         while self.running:
             try:
-                domain = random.choice(self.malware_domains)
                 url = random.choice(self.malware_urls)
-                user_agent = random.choice(self.user_agents)
+                method = random.choice(['GET', 'POST'])
                 
-                headers = {
-                    'User-Agent': user_agent,
-                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                    'Accept-Language': 'en-US,en;q=0.5',
-                    'Accept-Encoding': 'gzip, deflate',
-                    'Connection': 'keep-alive',
-                    'Upgrade-Insecure-Requests': '1'
-                }
-                
-                # Add malware-specific headers
-                if random.random() < 0.3:
-                    headers['X-Bot-ID'] = f"bot_{random.randint(1000, 9999)}"
-                    headers['X-Campaign'] = f"campaign_{random.randint(1, 10)}"
-                
-                full_url = f"http://{domain}{url}"
-                
-                # Random request type
-                if random.random() < 0.7:
-                    response = requests.get(full_url, headers=headers, timeout=5)
+                if method == 'GET':
+                    response = requests.get(
+                        f"http://{self.target_host}:{self.ports['http']}{url}",
+                        timeout=5,
+                        verify=False
+                    )
                 else:
-                    payload = {
-                        'id': random.randint(1, 1000),
-                        'status': random.choice(['online', 'offline', 'idle']),
-                        'data': 'base64_encoded_data_here',
-                        'timestamp': datetime.now().isoformat()
-                    }
-                    response = requests.post(full_url, json=payload, headers=headers, timeout=5)
+                    response = requests.post(
+                        f"http://{self.target_host}:{self.ports['http']}{url}",
+                        data={'data': 'malware_payload'},
+                        timeout=5,
+                        verify=False
+                    )
                 
+                print(f"[HTTP] {response.status_code} http://{self.target_host}:{self.ports['http']}{url}")
                 self.update_stats('http_requests')
-                print(f"[HTTP] {response.status_code} {full_url}")
+                
+                time.sleep(random.uniform(1, 5))
                 
             except Exception as e:
                 self.update_stats('errors')
-                print(f"[HTTP ERROR] {e}")
-            
-            time.sleep(random.uniform(0.5, 3.0))
+                time.sleep(2)
     
     def generate_https_traffic(self):
-        """Generate HTTPS traffic simulating secure malware communications"""
+        """Generate HTTPS traffic"""
+        if not self.libraries['requests']:
+            return
+            
         while self.running:
             try:
-                domain = random.choice(self.malware_domains)
                 url = random.choice(self.malware_urls)
-                user_agent = random.choice(self.user_agents)
+                method = random.choice(['GET', 'POST'])
                 
-                headers = {
-                    'User-Agent': user_agent,
-                    'Accept': 'application/json',
-                    'Content-Type': 'application/json',
-                    'X-Requested-With': 'XMLHttpRequest'
-                }
-                
-                full_url = f"https://{domain}{url}"
-                
-                # Simulate encrypted C2 communications
-                if random.random() < 0.5:
-                    encrypted_payload = {
-                        'encrypted_data': 'AES256_encrypted_command_data',
-                        'signature': 'RSA_signature_hash',
-                        'timestamp': int(time.time())
-                    }
-                    response = requests.post(full_url, json=encrypted_payload, headers=headers, timeout=5, verify=False)
+                if method == 'GET':
+                    response = requests.get(
+                        f"https://{self.target_host}:{self.ports['https']}{url}",
+                        timeout=5,
+                        verify=False
+                    )
                 else:
-                    response = requests.get(full_url, headers=headers, timeout=5, verify=False)
+                    response = requests.post(
+                        f"https://{self.target_host}:{self.ports['https']}{url}",
+                        data={'data': 'malware_payload'},
+                        timeout=5,
+                        verify=False
+                    )
                 
+                print(f"[HTTPS] {response.status_code} https://{self.target_host}:{self.ports['https']}{url}")
                 self.update_stats('https_requests')
-                print(f"[HTTPS] {response.status_code} {full_url}")
+                
+                time.sleep(random.uniform(1, 5))
                 
             except Exception as e:
                 self.update_stats('errors')
-                print(f"[HTTPS ERROR] {e}")
-            
-            time.sleep(random.uniform(1.0, 4.0))
+                time.sleep(2)
     
     def generate_ftp_traffic(self):
-        """Generate FTP traffic simulating file transfers"""
+        """Generate FTP traffic"""
+        if not self.libraries['ftp']:
+            return
+            
         while self.running:
             try:
-                # Use alternative FTP port to avoid conflicts
                 ftp = FTP()
-                ftp.connect(self.target_host, 2121, timeout=10)
+                ftp.connect(self.target_host, self.ports['ftp'])
                 ftp.login('anonymous', 'malware@evil.com')
                 
-                # Simulate various FTP operations
-                operations = ['pwd', 'list', 'cwd', 'upload', 'download']
-                operation = random.choice(operations)
+                # Random FTP commands
+                commands = ['pwd', 'cwd /uploads', 'type A']
+                command = random.choice(commands)
                 
-                if operation == 'pwd':
+                if command == 'pwd':
                     ftp.pwd()
-                elif operation == 'list':
-                    ftp.retrlines('LIST')
-                elif operation == 'cwd':
+                elif command.startswith('cwd'):
                     try:
                         ftp.cwd('/uploads')
                     except:
                         pass
-                elif operation == 'upload':
-                    # Simulate file upload
-                    fake_data = b"Fake malware payload data"
-                    ftp.storbinary('STOR malware.exe', fake_data)
-                elif operation == 'download':
-                    # Simulate file download
-                    try:
-                        ftp.retrbinary('RETR config.bin', lambda x: None)
-                    except:
-                        pass
+                elif command == 'type A':
+                    ftp.sendcmd('TYPE A')
                 
                 ftp.quit()
+                
+                print(f"[FTP] Connected to port {self.ports['ftp']} and performed {command}")
                 self.update_stats('ftp_connections')
-                print(f"[FTP] Connected and performed {operation}")
+                
+                time.sleep(random.uniform(2, 8))
                 
             except Exception as e:
                 self.update_stats('errors')
-                print(f"[FTP ERROR] {e}")
-            
-            time.sleep(random.uniform(5.0, 15.0))
+                time.sleep(3)
     
     def generate_smtp_traffic(self):
-        """Generate SMTP traffic simulating email communications"""
+        """Generate SMTP traffic"""
+        if not self.libraries['email']:
+            return
+            
         while self.running:
             try:
-                server = smtplib.SMTP(self.target_host, 25, timeout=10)
-                server.helo('malware-bot.local')
-                
-                # Simulate sending spam/phishing emails
                 msg = MIMEMultipart()
                 msg['From'] = 'noreply@malware-bot.com'
                 msg['To'] = 'victim@target.com'
                 msg['Subject'] = random.choice([
-                    'Urgent: Your account has been compromised',
                     'Important security update required',
                     'Your package is ready for delivery',
-                    'Congratulations! You have won $1,000,000',
-                    'Action required: Verify your identity'
+                    'Urgent: Your account has been compromised',
+                    'Action required: Verify your identity',
+                    'Congratulations! You have won $1,000,000'
                 ])
                 
                 body = "This is a fake phishing email generated for testing purposes."
                 msg.attach(MIMEText(body, 'plain'))
                 
+                server = smtplib.SMTP(self.target_host, self.ports['smtp'])
+                server.helo('malware-bot.local')
                 server.sendmail('noreply@malware-bot.com', 'victim@target.com', msg.as_string())
                 server.quit()
                 
+                print(f"[SMTP] Email sent successfully to port {self.ports['smtp']}")
                 self.update_stats('smtp_connections')
-                print(f"[SMTP] Email sent successfully")
+                
+                time.sleep(random.uniform(5, 15))
                 
             except Exception as e:
                 self.update_stats('errors')
-                print(f"[SMTP ERROR] {e}")
-            
-            time.sleep(random.uniform(10.0, 30.0))
+                time.sleep(3)
     
     def generate_dns_traffic(self):
-        """Generate DNS traffic simulating domain lookups"""
+        """Generate DNS traffic"""
         while self.running:
             try:
                 domain = random.choice(self.malware_domains)
                 
                 # Create DNS query
                 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                sock.settimeout(5)
+                sock.settimeout(2)
                 
-                # Simple DNS query for A record
-                query = self.build_dns_query(domain)
-                sock.sendto(query, (self.target_host, 53))
+                # Build simple DNS query
+                query = b'\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00'
+                for part in domain.split('.'):
+                    query += bytes([len(part)]) + part.encode()
+                query += b'\x00\x00\x01\x00\x01'
                 
-                response = sock.recv(1024)
-                sock.close()
-                
-                self.update_stats('dns_queries')
-                print(f"[DNS] Queried {domain}")
-                
-            except Exception as e:
-                self.update_stats('errors')
-                print(f"[DNS ERROR] {e}")
-            
-            time.sleep(random.uniform(0.1, 2.0))
-    
-    def build_dns_query(self, domain):
-        """Build a simple DNS query packet"""
-        query = b'\x12\x34'  # Transaction ID
-        query += b'\x01\x00'  # Flags
-        query += b'\x00\x01'  # Questions
-        query += b'\x00\x00'  # Answer RRs
-        query += b'\x00\x00'  # Authority RRs
-        query += b'\x00\x00'  # Additional RRs
-        
-        # Add domain name
-        for part in domain.split('.'):
-            query += bytes([len(part)]) + part.encode()
-        query += b'\x00'  # End of name
-        
-        query += b'\x00\x01'  # Type A
-        query += b'\x00\x01'  # Class IN
-        
-        return query
-    
-    def generate_tcp_traffic(self):
-        """Generate raw TCP traffic to various ports"""
-        while self.running:
-            try:
-                ports = [80, 443, 21, 25, 53, 110, 143, 993, 995, 8080, 8443, 3389, 5900]
-                port = random.choice(ports)
-                
-                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                sock.settimeout(5)
-                sock.connect((self.target_host, port))
-                
-                # Send some random data
-                data = f"GET / HTTP/1.1\r\nHost: {self.target_host}\r\n\r\n".encode()
-                sock.send(data)
-                
-                response = sock.recv(1024)
-                sock.close()
-                
-                self.update_stats('tcp_connections')
-                print(f"[TCP] Connected to port {port}")
-                
-            except Exception as e:
-                self.update_stats('errors')
-                print(f"[TCP ERROR] {e}")
-            
-            time.sleep(random.uniform(1.0, 5.0))
-    
-    def generate_udp_traffic(self):
-        """Generate UDP traffic to various ports"""
-        while self.running:
-            try:
-                ports = [53, 123, 161, 514, 1194, 4500, 5060]
-                port = random.choice(ports)
-                
-                sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                sock.settimeout(5)
-                
-                # Send random UDP data
-                data = f"UDP test data {random.randint(1, 1000)}".encode()
-                sock.sendto(data, (self.target_host, port))
+                sock.sendto(query, (self.target_host, self.ports['dns']))
                 
                 try:
                     response = sock.recv(1024)
+                    print(f"[DNS] Queried {domain} on port {self.ports['dns']}")
+                    self.update_stats('dns_queries')
                 except socket.timeout:
                     pass
                 
                 sock.close()
-                
-                self.update_stats('udp_packets')
-                print(f"[UDP] Sent packet to port {port}")
+                time.sleep(random.uniform(0.5, 3))
                 
             except Exception as e:
                 self.update_stats('errors')
-                print(f"[UDP ERROR] {e}")
-            
-            time.sleep(random.uniform(0.5, 3.0))
+                time.sleep(2)
+    
+    def generate_tcp_traffic(self):
+        """Generate TCP traffic"""
+        while self.running:
+            try:
+                port = random.choice([self.ports['ftp'], self.ports['http'], self.ports['https']])
+                
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(2)
+                sock.connect((self.target_host, port))
+                
+                print(f"[TCP] Connected to port {port}")
+                self.update_stats('tcp_connections')
+                
+                sock.close()
+                time.sleep(random.uniform(1, 4))
+                
+            except Exception as e:
+                self.update_stats('errors')
+                time.sleep(2)
+    
+    def generate_udp_traffic(self):
+        """Generate UDP traffic"""
+        while self.running:
+            try:
+                port = random.choice([self.ports['dns'], 123, 161, 514, 1194, 4500, 5060, 5353])
+                
+                sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                sock.settimeout(1)
+                
+                # Send random UDP data
+                data = os.urandom(random.randint(10, 100))
+                sock.sendto(data, (self.target_host, port))
+                
+                print(f"[UDP] Sent packet to port {port}")
+                self.update_stats('udp_packets')
+                
+                sock.close()
+                time.sleep(random.uniform(2, 6))
+                
+            except Exception as e:
+                self.update_stats('errors')
+                time.sleep(2)
     
     def print_stats(self):
         """Print traffic statistics"""
-        while self.running:
-            time.sleep(10)
-            with self.stats_lock:
-                print(f"\n--- Traffic Statistics ---")
-                print(f"HTTP Requests: {self.stats['http_requests']}")
-                print(f"HTTPS Requests: {self.stats['https_requests']}")
-                print(f"FTP Connections: {self.stats['ftp_connections']}")
-                print(f"SMTP Connections: {self.stats['smtp_connections']}")
-                print(f"DNS Queries: {self.stats['dns_queries']}")
-                print(f"TCP Connections: {self.stats['tcp_connections']}")
-                print(f"UDP Packets: {self.stats['udp_packets']}")
-                print(f"Errors: {self.stats['errors']}")
-                print(f"--- End Statistics ---\n")
-    
-    def start(self):
-        """Start generating traffic"""
-        print(f"Starting traffic generation to {self.target_host} for {self.duration} seconds...")
-        self.running = True
+        platform_name = "Windows" if WindowsCompatibility.is_windows() else "Unix/Linux"
         
-        # Start traffic generators
+        print(f"\n--- Traffic Statistics ({platform_name}) ---")
+        with self.stats_lock:
+            for key, value in self.stats.items():
+                print(f"{key.replace('_', ' ').title()}: {value}")
+        print("--- End Statistics ---\n")
+    
+    def run(self):
+        """Start traffic generation"""
+        print(f"Platform: {platform.system()} {platform.release()}")
+        print(f"Starting traffic generation on {platform.system()} {platform.release()}")
+        print(f"Target: {self.target_host}, Duration: {self.duration}s, Threads: {self.threads}")
+        print(f"Using ports: HTTP={self.ports['http']}, HTTPS={self.ports['https']}, FTP={self.ports['ftp']}, SMTP={self.ports['smtp']}, DNS={self.ports['dns']}")
+        print(f"Available libraries: requests={self.libraries['requests']}, email={self.libraries['email']}, ftp={self.libraries['ftp']}")
+        
+        self.running = True
+        threads = []
+        
+        # Start traffic generation threads
         generators = [
             self.generate_http_traffic,
             self.generate_https_traffic,
@@ -377,48 +374,58 @@ class TrafficGenerator:
             self.generate_udp_traffic
         ]
         
-        threads = []
-        for generator in generators:
-            for _ in range(self.threads // len(generators) + 1):
-                thread = threading.Thread(target=generator)
-                thread.daemon = True
-                thread.start()
-                threads.append(thread)
+        for i in range(self.threads):
+            generator = generators[i % len(generators)]
+            thread = threading.Thread(target=generator)
+            thread.daemon = True
+            thread.start()
+            threads.append(thread)
         
-        # Start statistics thread
-        stats_thread = threading.Thread(target=self.print_stats)
+        # Stats thread
+        stats_thread = threading.Thread(target=self.stats_printer)
         stats_thread.daemon = True
         stats_thread.start()
         
-        # Run for specified duration
-        start_time = time.time()
         try:
-            while time.time() - start_time < self.duration:
-                time.sleep(1)
+            time.sleep(self.duration)
         except KeyboardInterrupt:
             print("\nStopping traffic generation...")
         
         self.running = False
-        
-        # Print final stats
-        print(f"\n--- Final Statistics ---")
+        print("\n--- Final Statistics ---")
         with self.stats_lock:
             for key, value in self.stats.items():
                 print(f"{key.replace('_', ' ').title()}: {value}")
+    
+    def stats_printer(self):
+        """Print periodic statistics"""
+        while self.running:
+            time.sleep(30)  # Print stats every 30 seconds
+            if self.running:
+                self.print_stats()
 
 def main():
-    parser = argparse.ArgumentParser(description='Fake Network Traffic Generator for Testing')
-    parser.add_argument('--host', '-H', default='127.0.0.1', help='Target host (default: 127.0.0.1)')
-    parser.add_argument('--duration', '-d', type=int, default=300, help='Duration in seconds (default: 300)')
-    parser.add_argument('--threads', '-t', type=int, default=10, help='Number of threads (default: 10)')
-    parser.add_argument('--protocols', '-p', nargs='+', 
-                       choices=['http', 'https', 'ftp', 'smtp', 'dns', 'tcp', 'udp', 'all'],
-                       default=['all'], help='Protocols to generate traffic for')
+    parser = argparse.ArgumentParser(description='HoneyNet Traffic Generator - Windows Edition')
+    parser.add_argument('--host', '-H', default='127.0.0.1', help='Target host')
+    parser.add_argument('--duration', '-d', type=int, default=300, help='Duration in seconds')
+    parser.add_argument('--threads', '-t', type=int, default=10, help='Number of threads')
     
     args = parser.parse_args()
     
-    generator = TrafficGenerator(args.host, args.duration, args.threads)
-    generator.start()
+    # Disable SSL warnings for self-signed certificates
+    import urllib3
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    
+    generator = TrafficGeneratorWindows(
+        target_host=args.host,
+        duration=args.duration,
+        threads=args.threads
+    )
+    
+    try:
+        generator.run()
+    except KeyboardInterrupt:
+        print("\nStopped by user")
 
 if __name__ == "__main__":
     main()
