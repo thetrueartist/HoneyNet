@@ -24,6 +24,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 import tempfile
 import ipaddress
+import subprocess
 
 class WindowsCompatibility:
     """Windows compatibility layer for HoneyNet"""
@@ -56,13 +57,24 @@ class WindowsCompatibility:
                 'dns': 5353      # Avoid Windows DNS service conflicts
             }
         else:
-            return {
-                'http': 80,
-                'https': 443,
-                'ftp': 2121,
-                'smtp': 25,
-                'dns': 53
-            }
+            # On Unix/Linux, use high ports if not running as root
+            if WindowsCompatibility.is_admin():
+                return {
+                    'http': 80,
+                    'https': 443,
+                    'ftp': 2121,
+                    'smtp': 25,
+                    'dns': 53
+                }
+            else:
+                return {
+                    'http': 8080,    # Non-privileged ports
+                    'https': 8443,   # Non-privileged ports
+                    'ftp': 2121,     # Already non-privileged
+                    'smtp': 2525,    # Non-privileged port
+                    'dns': 5353      # Non-privileged port
+                }
+    
     
     @staticmethod
     def get_cert_dir():
@@ -378,8 +390,6 @@ class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
 class SSLHTTPServer(ThreadedHTTPServer):
     def __init__(self, server_address, RequestHandlerClass, logger, cache, cert_manager):
         self.cert_manager = cert_manager
-        super().__init__(server_address, RequestHandlerClass, logger, cache)
-        
         # Generate certificate for this server
         cert_path, key_path = self.cert_manager.generate_certificate()
         
@@ -387,10 +397,16 @@ class SSLHTTPServer(ThreadedHTTPServer):
         self.ssl_context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
         self.ssl_context.load_cert_chain(cert_path, key_path)
         
-        # Wrap socket with SSL
-        self.socket = self.ssl_context.wrap_socket(self.socket, server_side=True)
+        # Initialize parent class first
+        super().__init__(server_address, RequestHandlerClass, logger, cache)
         
         logger.logger.info(f"SSL/TLS enabled with certificate: {cert_path}")
+    
+    def server_bind(self):
+        # Bind socket first
+        super().server_bind()
+        # Then wrap with SSL
+        self.socket = self.ssl_context.wrap_socket(self.socket, server_side=True)
 
 class HTTPSRequestHandler(HTTPRequestHandler):
     def handle_request(self, method):
@@ -601,6 +617,275 @@ class SMTPServer:
         if self.socket:
             self.socket.close()
 
+class MalwareTrafficInterceptor:
+    """FakeNet-style traffic interception for malware analysis"""
+    
+    def __init__(self, honeynet_instance):
+        self.honeynet = honeynet_instance
+        self.logger = honeynet_instance.logger
+        self.running = False
+        self.original_iptables = None
+        self.original_dns = None
+        
+    def setup_iptables_redirection(self):
+        """Setup iptables to redirect all HTTP/HTTPS traffic to HoneyNet"""
+        try:
+            if os.geteuid() != 0:
+                self.logger.logger.error("Root privileges required for traffic interception")
+                return False
+            
+            # Save current iptables rules
+            result = subprocess.run(['iptables-save'], capture_output=True, text=True)
+            self.original_iptables = result.stdout
+            
+            # Clear existing nat table rules
+            subprocess.run(['iptables', '-t', 'nat', '-F'], check=True)
+            subprocess.run(['iptables', '-t', 'nat', '-X'], check=True)
+            
+            # Redirect HTTP traffic (port 80) to HoneyNet
+            subprocess.run([
+                'iptables', '-t', 'nat', '-A', 'OUTPUT',
+                '-p', 'tcp', '--dport', '80',
+                '!', '-d', '127.0.0.1',  # Don't redirect localhost
+                '-j', 'REDIRECT', '--to-ports', str(self.honeynet.ports['http'])
+            ], check=True)
+            
+            # Redirect HTTPS traffic (port 443) to HoneyNet  
+            subprocess.run([
+                'iptables', '-t', 'nat', '-A', 'OUTPUT',
+                '-p', 'tcp', '--dport', '443',
+                '!', '-d', '127.0.0.1',
+                '-j', 'REDIRECT', '--to-ports', str(self.honeynet.ports['https'])
+            ], check=True)
+            
+            # Redirect FTP traffic
+            subprocess.run([
+                'iptables', '-t', 'nat', '-A', 'OUTPUT',
+                '-p', 'tcp', '--dport', '21',
+                '!', '-d', '127.0.0.1',
+                '-j', 'REDIRECT', '--to-ports', str(self.honeynet.ports['ftp'])
+            ], check=True)
+            
+            # Redirect SMTP traffic
+            subprocess.run([
+                'iptables', '-t', 'nat', '-A', 'OUTPUT',
+                '-p', 'tcp', '--dport', '25',
+                '!', '-d', '127.0.0.1',
+                '-j', 'REDIRECT', '--to-ports', str(self.honeynet.ports['smtp'])
+            ], check=True)
+            
+            # Redirect DNS traffic
+            subprocess.run([
+                'iptables', '-t', 'nat', '-A', 'OUTPUT',
+                '-p', 'udp', '--dport', '53',
+                '!', '-d', '127.0.0.1',
+                '-j', 'REDIRECT', '--to-ports', str(self.honeynet.ports['dns'])
+            ], check=True)
+            
+            self.logger.logger.info("✓ iptables redirection rules installed")
+            return True
+            
+        except subprocess.CalledProcessError as e:
+            self.logger.logger.error(f"Failed to setup iptables: {e}")
+            return False
+        except Exception as e:
+            self.logger.logger.error(f"iptables setup error: {e}")
+            return False
+    
+    def setup_dns_redirection(self):
+        """Redirect DNS to HoneyNet DNS server"""
+        try:
+            if os.geteuid() != 0:
+                return False
+                
+            # Backup original resolv.conf
+            subprocess.run(['cp', '/etc/resolv.conf', '/etc/resolv.conf.honeynet.backup'], check=True)
+            
+            # Create new resolv.conf pointing to HoneyNet DNS
+            dns_config = f"""# HoneyNet DNS Configuration
+nameserver 127.0.0.1
+# Original DNS servers as fallback
+nameserver 8.8.8.8
+nameserver 8.8.4.4
+"""
+            
+            with open('/etc/resolv.conf', 'w') as f:
+                f.write(dns_config)
+            
+            self.logger.logger.info("✓ DNS redirection configured")
+            return True
+            
+        except Exception as e:
+            self.logger.logger.error(f"DNS redirection failed: {e}")
+            return False
+    
+    def start_malware_interception(self):
+        """Start FakeNet-style malware traffic interception"""
+        self.running = True
+        
+        if os.geteuid() != 0:
+            self.logger.logger.error("❌ ROOT PRIVILEGES REQUIRED FOR MALWARE INTERCEPTION")
+            self.logger.logger.error("Run with: sudo python3 honeynet_windows.py")
+            return False
+        
+        self.logger.logger.info("🍯 Starting FakeNet-style malware traffic interception...")
+        
+        # Setup iptables redirection
+        if self.setup_iptables_redirection():
+            self.logger.logger.info("✓ Network traffic redirection active")
+        else:
+            self.logger.logger.error("✗ Failed to setup traffic redirection")
+            return False
+        
+        # Setup DNS redirection
+        if self.setup_dns_redirection():
+            self.logger.logger.info("✓ DNS redirection active")
+        
+        self.logger.logger.info("🔥 MALWARE INTERCEPTION ACTIVE - All network traffic will be captured!")
+        self.logger.logger.info("Run your malware sample now...")
+        
+        return True
+    
+    def stop_interception(self):
+        """Stop interception and restore original settings"""
+        self.running = False
+        
+        try:
+            if os.geteuid() == 0:
+                # Restore iptables
+                if self.original_iptables:
+                    with open('/tmp/iptables_restore.txt', 'w') as f:
+                        f.write(self.original_iptables)
+                    subprocess.run(['iptables-restore', '/tmp/iptables_restore.txt'], check=True)
+                    self.logger.logger.info("✓ iptables rules restored")
+                
+                # Restore DNS
+                if os.path.exists('/etc/resolv.conf.honeynet.backup'):
+                    subprocess.run(['cp', '/etc/resolv.conf.honeynet.backup', '/etc/resolv.conf'], check=True)
+                    self.logger.logger.info("✓ DNS configuration restored")
+                
+                self.logger.logger.info("🔒 Malware interception stopped and system restored")
+            
+        except Exception as e:
+            self.logger.logger.error(f"Error restoring system: {e}")
+    
+    def show_malware_instructions(self):
+        """Show instructions for malware analysis"""
+        instructions = f"""
+╔══════════════════════════════════════════════════════════════════════════════════════╗
+║                         🦠 HoneyNet Malware Analysis Mode 🦠                         ║
+╠══════════════════════════════════════════════════════════════════════════════════════╣
+║                                                                                      ║
+║  🚨 MALWARE INTERCEPTION ACTIVE                                                      ║
+║                                                                                      ║
+║  📋 What's being intercepted:                                                       ║
+║     • All HTTP traffic  (port 80  → {self.honeynet.ports['http']})                    ║
+║     • All HTTPS traffic (port 443 → {self.honeynet.ports['https']})                  ║
+║     • All FTP traffic   (port 21  → {self.honeynet.ports['ftp']})                    ║
+║     • All SMTP traffic  (port 25  → {self.honeynet.ports['smtp']})                   ║
+║     • All DNS queries   (port 53  → {self.honeynet.ports['dns']})                    ║
+║                                                                                      ║
+║  🔬 Ready for malware analysis:                                                     ║
+║     1. Run your malware sample                                                      ║
+║     2. All network connections will be logged                                       ║
+║     3. HTTP/HTTPS requests will be captured                                         ║
+║     4. DNS queries will be resolved to localhost                                    ║
+║                                                                                      ║
+║  📊 Monitoring:                                                                     ║
+║     • Watch the logs for [MALWARE] and [INTERCEPTED] entries                       ║
+║     • All traffic will appear in honeynet_windows.log                              ║
+║                                                                                      ║
+║  ⚠️  WARNING: System network traffic is being redirected!                           ║
+║     • Stop HoneyNet to restore normal networking                                    ║
+║     • Press Ctrl+C to stop and restore system                                      ║
+║                                                                                      ║
+╚══════════════════════════════════════════════════════════════════════════════════════╝
+        """
+        
+        print(instructions)
+
+class TrafficInterceptor:
+    def __init__(self, honeynet_instance):
+        self.honeynet = honeynet_instance
+        self.logger = honeynet_instance.logger
+        self.running = False
+        self.capture_process = None
+        
+    def start_traffic_monitoring(self):
+        """Start monitoring network traffic"""
+        try:
+            # Monitor traffic on HoneyNet ports
+            cmd = [
+                'ss', '-tuln'  # Show listening ports
+            ]
+            
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            self.logger.logger.info(f"Current listening ports:\n{result.stdout}")
+            
+            # Start simple traffic monitor
+            def monitor_connections():
+                while self.running:
+                    try:
+                        # Check for connections to our ports
+                        cmd = ['ss', '-tn', 'sport', f':{self.honeynet.ports["http"]}', 'or', 'sport', f':{self.honeynet.ports["https"]}']
+                        result = subprocess.run(cmd, capture_output=True, text=True)
+                        
+                        if result.stdout.strip():
+                            self.logger.logger.info(f"[TRAFFIC] Active connections:\n{result.stdout}")
+                        
+                        time.sleep(5)
+                    except Exception as e:
+                        self.logger.logger.error(f"Traffic monitoring error: {e}")
+                        break
+            
+            self.running = True
+            monitor_thread = threading.Thread(target=monitor_connections)
+            monitor_thread.daemon = True
+            monitor_thread.start()
+            
+            self.logger.logger.info("Traffic monitoring started")
+            
+        except Exception as e:
+            self.logger.logger.error(f"Failed to start traffic monitoring: {e}")
+    
+    def setup_browser_instructions(self):
+        """Show instructions for browser configuration"""
+        ports = self.honeynet.ports
+        
+        instructions = f"""
+╔══════════════════════════════════════════════════════════════════════════════════════╗
+║                           🍯 HoneyNet Browser Configuration 🍯                        ║
+╠══════════════════════════════════════════════════════════════════════════════════════╣
+║                                                                                      ║
+║  To see web traffic in HoneyNet, configure your browser to use HoneyNet as proxy:   ║
+║                                                                                      ║
+║  📋 Manual Browser Configuration:                                                    ║
+║     • Open browser proxy settings                                                   ║
+║     • Set HTTP Proxy: 127.0.0.1:{ports['http']}                                        ║
+║     • Set HTTPS Proxy: 127.0.0.1:{ports['https']}                                      ║
+║                                                                                      ║
+║  🔗 Direct Testing URLs:                                                            ║
+║     • HTTP:  http://127.0.0.1:{ports['http']}                                         ║
+║     • HTTPS: https://127.0.0.1:{ports['https']} (ignore cert warning)                ║
+║                                                                                      ║
+║  📊 Alternative - Redirect specific domains:                                        ║
+║     • Add to /etc/hosts: 127.0.0.1 example.com                                     ║
+║     • Then browse to: http://example.com:{ports['http']}                               ║
+║                                                                                      ║
+║  ⚠️  Root Mode: Run with sudo for transparent interception                          ║
+║                                                                                      ║
+╚══════════════════════════════════════════════════════════════════════════════════════╝
+        """
+        
+        print(instructions)
+        self.logger.logger.info("Browser configuration instructions displayed")
+    
+    def stop(self):
+        """Stop traffic monitoring"""
+        self.running = False
+        if self.capture_process:
+            self.capture_process.terminate()
+
 class HoneyNetWindows:
     def __init__(self, config=None):
         self.config = config or {}
@@ -610,6 +895,8 @@ class HoneyNetWindows:
         self.servers = []
         self.running = False
         self.ports = WindowsCompatibility.get_safe_ports()
+        self.malware_interceptor = MalwareTrafficInterceptor(self)
+        self.traffic_interceptor = TrafficInterceptor(self)
         
     def start(self):
         platform_name = "Windows" if WindowsCompatibility.is_windows() else "Unix/Linux"
@@ -633,22 +920,54 @@ class HoneyNetWindows:
         self.servers.append(dns_server)
         
         # Start HTTP server
-        http_server = ThreadedHTTPServer(('0.0.0.0', self.ports['http']), HTTPRequestHandler, self.logger, self.cache)
-        http_thread = threading.Thread(target=http_server.serve_forever)
-        http_thread.daemon = True
-        http_thread.start()
-        self.servers.append(http_server)
+        try:
+            self.logger.logger.info(f"Creating HTTP server on 0.0.0.0:{self.ports['http']}")
+            http_server = ThreadedHTTPServer(('0.0.0.0', self.ports['http']), HTTPRequestHandler, self.logger, self.cache)
+            self.logger.logger.info(f"HTTP server created successfully")
+            
+            def http_server_wrapper():
+                try:
+                    self.logger.logger.info(f"HTTP server thread starting on 0.0.0.0:{self.ports['http']}")
+                    http_server.serve_forever()
+                except Exception as e:
+                    self.logger.logger.error(f"HTTP server thread crashed: {e}")
+                    import traceback
+                    traceback.print_exc()
+            
+            http_thread = threading.Thread(target=http_server_wrapper)
+            http_thread.daemon = True
+            http_thread.start()
+            self.servers.append(http_server)
+            self.logger.logger.info(f"HTTP server thread started on 0.0.0.0:{self.ports['http']}")
+        except Exception as e:
+            self.logger.logger.error(f"Failed to start HTTP server: {e}")
+            import traceback
+            traceback.print_exc()
         
         # Start HTTPS server with SSL/TLS
         try:
+            self.logger.logger.info(f"Creating HTTPS server on 0.0.0.0:{self.ports['https']}")
             https_server = SSLHTTPServer(('0.0.0.0', self.ports['https']), HTTPSRequestHandler, self.logger, self.cache, self.cert_manager)
-            https_thread = threading.Thread(target=https_server.serve_forever)
+            self.logger.logger.info(f"HTTPS server created successfully")
+            
+            def https_server_wrapper():
+                try:
+                    self.logger.logger.info(f"HTTPS server thread starting on 0.0.0.0:{self.ports['https']}")
+                    https_server.serve_forever()
+                except Exception as e:
+                    self.logger.logger.error(f"HTTPS server thread crashed: {e}")
+                    import traceback
+                    traceback.print_exc()
+            
+            https_thread = threading.Thread(target=https_server_wrapper)
             https_thread.daemon = True
             https_thread.start()
             self.servers.append(https_server)
-            self.logger.logger.info("HTTPS server started with SSL/TLS interception")
+            self.logger.logger.info(f"HTTPS server thread started on 0.0.0.0:{self.ports['https']}")
         except Exception as e:
             self.logger.logger.error(f"Failed to start HTTPS server: {e}")
+            import traceback
+            traceback.print_exc()
         
         # Start FTP server
         ftp_server = FTPServer(logger=self.logger)
@@ -667,16 +986,69 @@ class HoneyNetWindows:
         platform_name = "Windows" if WindowsCompatibility.is_windows() else "Unix/Linux"
         self.logger.logger.info(f"All HoneyNet servers started successfully ({platform_name} Edition)")
         
+        # Test HTTP server is actually working
+        time.sleep(2)  # Give servers time to start
+        self.test_servers()
+        
+        # Start malware interception (FakeNet-style)
+        if os.geteuid() == 0:
+            if self.malware_interceptor.start_malware_interception():
+                self.malware_interceptor.show_malware_instructions()
+            else:
+                self.logger.logger.error("Failed to start malware interception")
+        else:
+            self.logger.logger.warning("⚠️  Not running as root - basic monitoring only")
+            self.logger.logger.warning("For full malware interception, run: sudo python3 honeynet_windows.py")
+            # Start basic traffic monitoring
+            self.traffic_interceptor.start_traffic_monitoring()
+            self.traffic_interceptor.setup_browser_instructions()
+        
         try:
             while self.running:
                 time.sleep(1)
         except KeyboardInterrupt:
             self.stop()
     
+    def test_servers(self):
+        """Test that servers are actually responding"""
+        import socket
+        
+        # Test HTTP server
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(2)
+            result = sock.connect_ex(('127.0.0.1', self.ports['http']))
+            sock.close()
+            
+            if result == 0:
+                self.logger.logger.info(f"✓ HTTP server is listening on port {self.ports['http']}")
+            else:
+                self.logger.logger.error(f"✗ HTTP server is NOT listening on port {self.ports['http']}")
+        except Exception as e:
+            self.logger.logger.error(f"✗ HTTP server test failed: {e}")
+            
+        # Test HTTPS server
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(2)
+            result = sock.connect_ex(('127.0.0.1', self.ports['https']))
+            sock.close()
+            
+            if result == 0:
+                self.logger.logger.info(f"✓ HTTPS server is listening on port {self.ports['https']}")
+            else:
+                self.logger.logger.error(f"✗ HTTPS server is NOT listening on port {self.ports['https']}")
+        except Exception as e:
+            self.logger.logger.error(f"✗ HTTPS server test failed: {e}")
+    
     def stop(self):
         platform_name = "Windows" if WindowsCompatibility.is_windows() else "Unix/Linux"
         self.logger.logger.info(f"Stopping HoneyNet ({platform_name} Edition)...")
         self.running = False
+        
+        # Stop traffic interceptors
+        self.malware_interceptor.stop_interception()
+        self.traffic_interceptor.stop()
         
         for server in self.servers:
             if hasattr(server, 'stop'):
