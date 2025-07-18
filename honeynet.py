@@ -43,7 +43,11 @@ class WindowsCompatibility:
             except:
                 return False
         else:
-            return os.geteuid() == 0
+            try:
+                return os.geteuid() == 0
+            except AttributeError:
+                # os.geteuid() doesn't exist on Windows
+                return False
     
     @staticmethod
     def get_safe_ports():
@@ -630,7 +634,7 @@ class MalwareTrafficInterceptor:
     def setup_iptables_redirection(self):
         """Setup iptables to redirect all HTTP/HTTPS traffic to HoneyNet"""
         try:
-            if os.geteuid() != 0:
+            if not WindowsCompatibility.is_admin():
                 self.logger.logger.error("Root privileges required for traffic interception")
                 return False
             
@@ -695,7 +699,7 @@ class MalwareTrafficInterceptor:
     def setup_dns_redirection(self):
         """Redirect DNS to HoneyNet DNS server"""
         try:
-            if os.geteuid() != 0:
+            if not WindowsCompatibility.is_admin():
                 return False
                 
             # Backup original resolv.conf
@@ -723,7 +727,7 @@ nameserver 8.8.4.4
         """Start FakeNet-style malware traffic interception"""
         self.running = True
         
-        if os.geteuid() != 0:
+        if not WindowsCompatibility.is_admin():
             self.logger.logger.error("❌ ROOT PRIVILEGES REQUIRED FOR MALWARE INTERCEPTION")
             self.logger.logger.error("Run with: sudo python3 honeynet_windows.py")
             return False
@@ -751,7 +755,7 @@ nameserver 8.8.4.4
         self.running = False
         
         try:
-            if os.geteuid() == 0:
+            if WindowsCompatibility.is_admin():
                 # Restore iptables
                 if self.original_iptables:
                     with open('/tmp/iptables_restore.txt', 'w') as f:
@@ -991,7 +995,7 @@ class HoneyNetWindows:
         self.test_servers()
         
         # Start malware interception (FakeNet-style)
-        if os.geteuid() == 0:
+        if WindowsCompatibility.is_admin():
             if self.malware_interceptor.start_malware_interception():
                 self.malware_interceptor.show_malware_instructions()
             else:
@@ -1070,7 +1074,7 @@ def main():
             print("Consider running as administrator for full functionality.")
     else:
         print("Platform: Unix/Linux")
-        if os.geteuid() != 0:
+        if not WindowsCompatibility.is_admin():
             print("WARNING: Not running with root privileges. Some features may not work correctly.")
             print("Consider running with sudo for full functionality.")
     
